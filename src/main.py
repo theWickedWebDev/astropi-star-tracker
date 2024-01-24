@@ -34,7 +34,6 @@ STEPHEN_HOUSE = EarthLocation(
     height=52.32 * u.m,  # pyright: ignore
 )
 
-
 def orientation_from_skycoord(coord: SkyCoord) -> tc.TelescopeOrientation:
     tcoord = coord.transform_to(HADec(obstime=Time.now(), location=STEPHEN_HOUSE))
     return tcoord.ha, tcoord.dec
@@ -55,34 +54,36 @@ async def main():
         bearing_pulse = virtual_pulse("bearing")
         dec_pulse = virtual_pulse("dec")
     else:
-        from .lib.pi import gpio, motor
-
-        gpio.setup()
+        from .lib import motor
 
         bearing_pulse = rpi_pulse(motor.RA_PINS)
-        dec_pulse = rpi_pulse(motor.DEC_PINS)
+        dec_pulse = rpi_pulse(motor.DEC_PINS, fwd=0, rev=1)
+
+    MAX_SPEED=1200
+    MAX_ACCEL=600
+    MAX_DECEL=600
 
     telescope = tc.TelescopeControl(
         config=tc.Config(
             bearing_axis=tc.StepperAxis(
                 motor_steps=800,
-                gear_ratio=4 * 4 * 4 * 4,
+                gear_ratio=4 * 4 * 4 * 4,  # / (1.00985 + .00985 + .00985 + .00985),
                 config=StepperConfig(
                     min_sleep_ns=50_000,
-                    max_speed=500,
-                    max_accel=200,
-                    max_decel=200,
+                    max_speed=MAX_SPEED,
+                    max_accel=MAX_ACCEL,
+                    max_decel=MAX_DECEL,
                     pulse=bearing_pulse,
                 ),
             ),
             declination_axis=tc.StepperAxis(
-                motor_steps=400,
-                gear_ratio=4 * 4,
+                motor_steps=800,
+                gear_ratio=4 * 4 * 4 * 4,
                 config=StepperConfig(
                     min_sleep_ns=50_000,
-                    max_speed=500,
-                    max_accel=200,
-                    max_decel=200,
+                    max_speed=MAX_SPEED,
+                    max_accel=MAX_ACCEL,
+                    max_decel=MAX_DECEL,
                     pulse=dec_pulse,
                 ),
             ),
@@ -115,7 +116,7 @@ def virtual_pulse(name: str):
 
 
 def rpi_pulse(pins, fwd=1, rev=0):
-    from .lib.pi import motor
+    from .lib import motor
 
     def pulse(stepper: Stepper, direction: StepDir):
         match direction:

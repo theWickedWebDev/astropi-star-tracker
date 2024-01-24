@@ -213,8 +213,8 @@ class Stepper:
             motion: _MotionQueue = Queue(maxsize=4)
 
             run_state = _RunState(
-                plan_thread=Thread(target=self._plan, args=[motion]),
-                run_thread=Thread(target=self._move, args=[motion]),
+                plan_thread=Thread(target=_with_error_printing(self._plan), args=[motion]),
+                run_thread=Thread(target=_with_error_printing(self._move), args=[motion]),
             )
             self._run_state = run_state
 
@@ -296,6 +296,18 @@ class Stepper:
                     self._velocity = 0
             finally:
                 motion.task_done()
+
+
+def _with_error_printing(fn):
+    def wrapper(*args, **kwargs):
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+
+    return wrapper
 
 
 @dataclass(frozen=True)

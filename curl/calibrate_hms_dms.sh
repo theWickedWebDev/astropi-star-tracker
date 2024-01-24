@@ -1,0 +1,1 @@
+curl -X POST 'http://0.0.0.0:8765/api/calibrate/?ra='$1'&dec='$2

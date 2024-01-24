@@ -1,4 +1,6 @@
 __pycache__
 node_modules
 .vscode
-camera/tmpfile*
+tmpfile
+tmp*
+.vscode
