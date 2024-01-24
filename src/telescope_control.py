@@ -4,13 +4,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import functools
 import logging
+import math
 import multiprocessing as mp
 import multiprocessing.connection as mpc
 import multiprocessing.synchronize as mps
+from queue import Queue
 from threading import Condition, Event, Thread
 import time
 from typing import Protocol, TypeAlias
 from typing_extensions import assert_never
+from uuid import UUID, uuid4
 
 import astropy.units as u
 from astropy.coordinates import (
@@ -31,32 +34,34 @@ from .stepper import Stepper, StepperConfig, compute_intercept
 
 TelescopeOrientation: TypeAlias = tuple[u.Quantity["angle"], u.Quantity["angle"]]
 
-
-@dataclass
+@dataclass(eq=False)
 class _Track:
     target: Target
+    id: UUID = field(default_factory=uuid4)
 
 
-@dataclass
+@dataclass(eq=False)
 class _Idle:
-    pass
+    id: UUID = field(default_factory=uuid4)
 
 
-@dataclass
+@dataclass(eq=False)
 class _Stop:
-    pass
+    id: UUID = field(default_factory=uuid4)
 
 
-@dataclass
+@dataclass(eq=False)
 class _Calibrate:
     bearing: u.Quantity["angle"]
     dec: u.Quantity["angle"]
+    id: UUID = field(default_factory=uuid4)
 
 
-@dataclass
+@dataclass(eq=False)
 class _CalibrateRelSteps:
     bearing: int
     dec: int
+    id: UUID = field(default_factory=uuid4)
 
 
 _Goal: TypeAlias = _Track | _Idle | _Stop
@@ -143,6 +148,7 @@ class TelescopeControl:
     _orientation: TelescopeOrientation
     _target: Target | None
     _log: logging.Logger
+    _progress_chans: dict[UUID, trio.MemorySendChannel[ActivityStatus]]
 
     def __init__(self, config: Config):
         self._config = config
@@ -153,6 +159,7 @@ class TelescopeControl:
         )
         self._target = None
         self._log = logging.getLogger(__name__)
+        self._progress_chans = {}
 
     @property
     def config(self):
@@ -166,8 +173,8 @@ class TelescopeControl:
     def target(self):
         return self._target
 
-    def track(self, target: Target):
-        self._put_message(_Track(target))
+    def track(self, target: Target) -> trio.MemoryReceiveChannel[ActivityStatus]:
+        return self._put_message(_Track(target))
 
     def current_skycoord(self):
         bearing, dec = self._orientation
@@ -178,7 +185,7 @@ class TelescopeControl:
             frame=HADec(obstime=Time.now(), location=self._config.location),
         ).transform_to(ICRS)
 
-    def calibrate(self, target: Target, track: bool = True):
+    def calibrate(self, target: Target, track: bool = True) -> trio.MemoryReceiveChannel[ActivityStatus]:
         coord = target.coordinate(Time.now(), self.config.location)
         tcoord = coord.transform_to(
             HADec(obstime=Time.now(), location=self.config.location)
@@ -187,12 +194,13 @@ class TelescopeControl:
         bearing: u.Quantity["angle"] = tcoord.ha  # pyright: ignore
         dec: u.Quantity["angle"] = tcoord.dec  # pyright: ignore
 
-        self._put_message(_Calibrate(bearing, dec))
+        chan = self._put_message(_Calibrate(bearing, dec))
         if track:
             self._put_message(_Track(target))
+        return chan
 
-    def calibrate_rel_steps(self, bearing: int, dec: int):
-        self._put_message(_CalibrateRelSteps(bearing, dec))
+    def calibrate_rel_steps(self, bearing: int, dec: int) -> trio.MemoryReceiveChannel[ActivityStatus]:
+        return self._put_message(_CalibrateRelSteps(bearing, dec))
 
     async def run(self):
         conn, child_conn = mp.Pipe()
@@ -219,12 +227,16 @@ class TelescopeControl:
                 await trio.sleep_forever()
             except:
                 stop.set()
+                raise
 
-    def _put_message(self, msg: _InputMessage):
+    def _put_message(self, msg: _InputMessage) -> trio.MemoryReceiveChannel[ActivityStatus]:
         if self._conn is None:
             raise RuntimeError("must be running to issue commands")
 
+        send_ch, recv_ch = trio.open_memory_channel[ActivityStatus](math.inf)
+        self._progress_chans[msg.id] = send_ch
         self._conn.send(msg)
+        return recv_ch
 
     def _run_multiprocess(
         self,
@@ -245,7 +257,7 @@ class TelescopeControl:
             if stop.is_set():
                 stop_deadline = time.time() + 5
                 self._log.info("stopping")
-                conn.send(_Stop())
+                self._put_message(_Stop())
                 stop.clear()
 
             if conn.poll(1):
@@ -268,6 +280,20 @@ class TelescopeControl:
                     case _ChildError():
                         child_had_error = True
                         stop.set()
+                    case _RequestProgress():
+
+                        def update():
+                            try:
+                                chan = self._progress_chans[msg.request.id]
+                            except KeyError:
+                                self._log.error(f"no channel found for request {msg.request}")
+                            else:
+                                chan.send_nowait(msg.status)
+                                if msg.status.done():
+                                    self._progress_chans.pop(msg.request.id)
+                                    chan.close()
+
+                        trio.from_thread.run_sync(update)
                     case _:
                         assert_never(msg)
 
@@ -299,8 +325,14 @@ class _ChildError:
     pass
 
 
+@dataclass
+class _RequestProgress:
+    request: _InputMessage
+    status: ActivityStatus
+
+
 _InputMessage: TypeAlias = _Calibrate | _CalibrateRelSteps | _Goal
-_OutputMessage: TypeAlias = _PublishTarget | _PublishOrientation | _Log | _ChildError
+_OutputMessage: TypeAlias = _PublishTarget | _PublishOrientation | _Log | _ChildError | _RequestProgress
 
 
 class StateFn(Protocol):
@@ -370,11 +402,14 @@ def _mp_main(config: Config, conn: mpc.Connection):
     ctx.bearing_motor.start()
     ctx.dec_motor.start()
 
+    activity_queue = Queue()
+
     threads = [
         Thread(target=target, args=args)
         for target, args in [
             (_with_error_printing(_publish_state), [ctx, conn]),
-            (_with_error_printing(_read_goals), [ctx, conn]),
+            (_with_error_printing(_read_goals), [ctx, conn, activity_queue]),
+            (_with_error_printing(_watch_activities), [conn, activity_queue]),
         ]
     ]
 
@@ -459,7 +494,7 @@ def _run_dispatch(ctx: _RunContext, conn: mpc.Connection) -> StateFn:
             assert_never(activity._goal)
 
 
-def _read_goals(ctx: _RunContext, conn: mpc.Connection):
+def _read_goals(ctx: _RunContext, conn: mpc.Connection, activity_queue: Queue[_Activity]):
     while True:
         msg: _InputMessage = conn.recv()
         match msg:
@@ -469,7 +504,9 @@ def _read_goals(ctx: _RunContext, conn: mpc.Connection):
                     if ctx.activity is not None:
                         ctx.log.debug(f"canceling activity: {ctx.activity}")
                         ctx.activity.cancel()
-                    ctx.activity = _TelescopeActivity(goal, ctx.activity_cond)
+                    activity = _TelescopeActivity(goal, ctx.activity_cond)
+                    activity_queue.put(activity)
+                    ctx.activity = activity
                     ctx.log.debug(f"set activity: {ctx.activity}")
                     ctx.cond.notify()
 
@@ -486,13 +523,35 @@ def _read_goals(ctx: _RunContext, conn: mpc.Connection):
                         - ctx.dec_motor.position
                     )
                 ctx.log.debug(f"calibrated: {ctx.bearing_offset}, {ctx.dec_offset}")
+                conn.send(_RequestProgress(msg, ActivityStatus.COMPLETE))
             case _CalibrateRelSteps(bearing, dec):
                 with ctx.cond:
                     ctx.bearing_offset += bearing
                     ctx.dec_offset += dec
                 ctx.log.debug(f"calibrated: {ctx.bearing_offset}, {ctx.dec_offset}")
+                conn.send(_RequestProgress(msg, ActivityStatus.COMPLETE))
             case _:
                 assert_never(msg)
+
+def _watch_activities(conn: mpc.Connection, queue: Queue[_Activity]):
+    while True:
+        activity = queue.get()
+
+        with activity._cond:
+            status = activity._status
+
+        while True:
+            conn.send(_RequestProgress(activity._goal, status))
+
+            if status.done():
+                break
+
+            with activity._cond:
+                activity._cond.wait_for(lambda: activity._status != status)
+                status = activity._status
+
+        if isinstance(activity._goal, _Stop):
+            break
 
 
 _: StateFn = _run_dispatch
