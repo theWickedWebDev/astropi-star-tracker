@@ -11,7 +11,7 @@ import multiprocessing.synchronize as mps
 from queue import Queue
 from threading import Condition, Event, Thread
 import time
-from typing import Protocol, TypeAlias
+from typing import Any, Protocol, TypeAlias
 from typing_extensions import assert_never
 from uuid import UUID, uuid4
 
@@ -33,6 +33,8 @@ from .motion import trapz_v_c_to_intercept_at_t
 from .stepper import Stepper, StepperConfig, compute_intercept
 
 TelescopeOrientation: TypeAlias = tuple[u.Quantity["angle"], u.Quantity["angle"]]
+StatusChannel: TypeAlias = trio.MemoryReceiveChannel[tuple[ActivityStatus, Any]]
+_SendStatusChannel: TypeAlias = trio.MemorySendChannel[tuple[ActivityStatus, Any]]
 
 @dataclass(eq=False)
 class _Track:
@@ -141,14 +143,13 @@ class MPCQueryTarget(Target):
             frame=ICRS,
         )
 
-
 class TelescopeControl:
     _config: Config
     _conn: mpc.Connection | None
     _orientation: TelescopeOrientation
     _target: Target | None
     _log: logging.Logger
-    _progress_chans: dict[UUID, trio.MemorySendChannel[ActivityStatus]]
+    _status_chans: dict[UUID, _SendStatusChannel]
 
     def __init__(self, config: Config):
         self._config = config
@@ -159,7 +160,7 @@ class TelescopeControl:
         )
         self._target = None
         self._log = logging.getLogger(__name__)
-        self._progress_chans = {}
+        self._status_chans = {}
 
     @property
     def config(self):
@@ -173,7 +174,7 @@ class TelescopeControl:
     def target(self):
         return self._target
 
-    def track(self, target: Target) -> trio.MemoryReceiveChannel[ActivityStatus]:
+    def track(self, target: Target) -> StatusChannel:
         return self._put_message(_Track(target))
 
     def current_skycoord(self):
@@ -185,7 +186,7 @@ class TelescopeControl:
             frame=HADec(obstime=Time.now(), location=self._config.location),
         ).transform_to(ICRS)
 
-    def calibrate(self, target: Target, track: bool = True) -> trio.MemoryReceiveChannel[ActivityStatus]:
+    def calibrate(self, target: Target, track: bool = True) -> StatusChannel:
         coord = target.coordinate(Time.now(), self.config.location)
         tcoord = coord.transform_to(
             HADec(obstime=Time.now(), location=self.config.location)
@@ -199,7 +200,7 @@ class TelescopeControl:
             self._put_message(_Track(target))
         return chan
 
-    def calibrate_rel_steps(self, bearing: int, dec: int) -> trio.MemoryReceiveChannel[ActivityStatus]:
+    def calibrate_rel_steps(self, bearing: int, dec: int) -> StatusChannel:
         return self._put_message(_CalibrateRelSteps(bearing, dec))
 
     async def run(self):
@@ -229,12 +230,12 @@ class TelescopeControl:
                 stop.set()
                 raise
 
-    def _put_message(self, msg: _InputMessage) -> trio.MemoryReceiveChannel[ActivityStatus]:
+    def _put_message(self, msg: _InputMessage) -> StatusChannel:
         if self._conn is None:
             raise RuntimeError("must be running to issue commands")
 
-        send_ch, recv_ch = trio.open_memory_channel[ActivityStatus](math.inf)
-        self._progress_chans[msg.id] = send_ch
+        send_ch, recv_ch = trio.open_memory_channel[tuple[ActivityStatus, Any]](math.inf)
+        self._status_chans[msg.id] = send_ch
         self._conn.send(msg)
         return recv_ch
 
@@ -284,13 +285,13 @@ class TelescopeControl:
 
                         def update():
                             try:
-                                chan = self._progress_chans[msg.request.id]
+                                chan = self._status_chans[msg.request.id]
                             except KeyError:
                                 self._log.error(f"no channel found for request {msg.request}")
                             else:
-                                chan.send_nowait(msg.status)
+                                chan.send_nowait((msg.status, msg.extra))
                                 if msg.status.done():
-                                    self._progress_chans.pop(msg.request.id)
+                                    self._status_chans.pop(msg.request.id)
                                     chan.close()
 
                         trio.from_thread.run_sync(update)
@@ -329,6 +330,7 @@ class _ChildError:
 class _RequestProgress:
     request: _InputMessage
     status: ActivityStatus
+    extra: Any = None
 
 
 _InputMessage: TypeAlias = _Calibrate | _CalibrateRelSteps | _Goal
@@ -402,7 +404,7 @@ def _mp_main(config: Config, conn: mpc.Connection):
     ctx.bearing_motor.start()
     ctx.dec_motor.start()
 
-    activity_queue = Queue()
+    activity_queue: Queue[_TelescopeActivity] = Queue()
 
     threads = [
         Thread(target=target, args=args)
@@ -533,7 +535,7 @@ def _read_goals(ctx: _RunContext, conn: mpc.Connection, activity_queue: Queue[_A
             case _:
                 assert_never(msg)
 
-def _watch_activities(conn: mpc.Connection, queue: Queue[_Activity]):
+def _watch_activities(conn: mpc.Connection, queue: Queue[_TelescopeActivity]):
     while True:
         activity = queue.get()
 
@@ -583,10 +585,8 @@ def _ag_wait_one_group(parent: _TelescopeActivity, groups: list[_ActivityGroup])
                 with parent._cond:
                     parent._status = ActivityStatus.ABORTED
                     parent._cond.notify_all()
-                return False
-    groups.pop(0)
-
-    return True
+                return None
+    return groups.pop(0)
 
 
 def _run_track(activity: _TelescopeActivity) -> StateFn:
@@ -683,12 +683,19 @@ def _run_track(activity: _TelescopeActivity) -> StateFn:
                     ]
                 )
 
-                if not _ag_wait_one_group(activity, activity_groups):
-                    if activity_groups[0] == intercept_group:
-                        ctx.log.info("canceled while intercepting")
-                    else:
-                        ctx.log.info("canceled while tracking")
-                    break
+                match _ag_wait_one_group(activity, activity_groups):
+                    case None:
+                        if activity_groups[0] == intercept_group:
+                            ctx.log.info("canceled while intercepting")
+                        else:
+                            ctx.log.info("canceled while tracking")
+                        break
+                    case completed if completed is intercept_group:
+                        with activity._cond:
+                            status = activity._status
+                        conn.send(_RequestProgress(goal, status, "slew_complete"))
+                    case _:
+                        pass
 
             _finalize_activity(activity)
             _clear_activity(ctx, activity)
@@ -774,6 +781,8 @@ def _run_stop(activity: _TelescopeActivity) -> StateFn:
     def run_stop(ctx: _RunContext, conn: mpc.Connection):
         ctx.log.info("stopping")
         ctx.stop.set()
+        _finalize_activity(activity)
+        _clear_activity(ctx, activity)
         return None
 
     return run_stop
