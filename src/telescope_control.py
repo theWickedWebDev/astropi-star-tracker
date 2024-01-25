@@ -404,7 +404,7 @@ def _mp_main(config: Config, conn: mpc.Connection):
     ctx.bearing_motor.start()
     ctx.dec_motor.start()
 
-    activity_queue = Queue()
+    activity_queue: Queue[_TelescopeActivity] = Queue()
 
     threads = [
         Thread(target=target, args=args)
@@ -535,7 +535,7 @@ def _read_goals(ctx: _RunContext, conn: mpc.Connection, activity_queue: Queue[_A
             case _:
                 assert_never(msg)
 
-def _watch_activities(conn: mpc.Connection, queue: Queue[_Activity]):
+def _watch_activities(conn: mpc.Connection, queue: Queue[_TelescopeActivity]):
     while True:
         activity = queue.get()
 
@@ -781,6 +781,8 @@ def _run_stop(activity: _TelescopeActivity) -> StateFn:
     def run_stop(ctx: _RunContext, conn: mpc.Connection):
         ctx.log.info("stopping")
         ctx.stop.set()
+        _finalize_activity(activity)
+        _clear_activity(ctx, activity)
         return None
 
     return run_stop
