@@ -4,3 +4,4 @@ node_modules
 tmpfile
 tmp*
 .vscode
+/dist
