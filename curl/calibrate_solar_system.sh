@@ -1,1 +1,0 @@
-curl -X POST 'http://0.0.0.0:8765/api/calibrate/solar_system_object/?name='$1

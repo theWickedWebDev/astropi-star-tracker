@@ -1,0 +1,13 @@
+[Unit]
+Description=Telescope Container
+After=snap.docker.dockerd.service
+Requires=snap.docker.dockerd.service
+
+[Service]
+Restart=always
+ExecStartPre=-/snap/bin/docker stop astropi
+ExecStartPre=-/snap/bin/docker rm astropi
+ExecStart=/snap/bin/docker run --privileged --name astropi --net=host astropi
+
+[Install]
+WantedBy=multi-user.target
