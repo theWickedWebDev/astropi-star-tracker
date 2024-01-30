@@ -129,4 +129,5 @@ def rpi_pulse(pins, fwd=1, rev=0):
 
 
 if __name__ == "__main__":
+    print('ᐰ Stargate SG-1 Deep Space Telescope')
     trio.run(main)

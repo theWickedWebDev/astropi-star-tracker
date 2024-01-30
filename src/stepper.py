@@ -282,7 +282,7 @@ class Stepper:
                 if sleep_ns < self._config.min_sleep_ns:
                     if d != StepDir.NOP:
                         # FIXME: Better telemetry
-                        _log.warn(f"running behind: {sleep_ns / 1_000_000_000}")
+                        _log.warn(f"MALP telemetry: {sleep_ns / 1_000_000_000}")
                     sleep_ns = self._config.min_sleep_ns
 
                 nsleep(sleep_ns)

@@ -35,6 +35,15 @@ async def _wait_slew_complete(chan: tc.StatusChannel) -> tuple[ActivityStatus, A
             break
     return status
 
+@api.route("/idle/", methods=["POST"])
+async def idle():
+    try:
+        await _final_status(get_telescope().idle())
+        return await returnResponse({"stopped": True }, 200)
+
+    except:
+        return await returnResponse({"stopped": False }, 400)
+
 
 @api.route("/calibrate/", methods=["POST"])
 async def calibrate():
@@ -47,10 +56,6 @@ async def calibrate():
                 tc.FixedTarget(SkyCoord(ra=_ra, dec=_dec, frame=ICRS))
             )
         )
-
-        # ActivityStatus.COMPLETE = good, ActivityStatus.ABORTED = maybe bad,
-        # None = something went wrong (the command never produced any status)
-        print(status)
 
         return await returnResponse({"calibrated": True, "ra": _ra, "dec": _dec}, 200)
 
@@ -65,10 +70,6 @@ async def calibrate_by_name():
         status, _ = await _final_status(
             get_telescope().calibrate(tc.FixedTarget(SkyCoord.from_name(_name)))
         )
-
-        # ActivityStatus.COMPLETE = good, ActivityStatus.ABORTED = maybe bad,
-        # None = something went wrong (the command never produced any status)
-        print(status)
 
         return await returnResponse({"calibrated": True, "name": _name}, 200)
     except:
@@ -94,9 +95,6 @@ async def calibrate_bump():
         # NOTE: It's important to wait for the final status _after_ issuing the
         # track command, so we don't cause an unwanted delay.
         status, _ = await _final_status(chan)
-        # ActivityStatus.COMPLETE = good, ActivityStatus.ABORTED = maybe bad,
-        # None = something went wrong (the command never produced any status)
-        print(status)
 
         return await returnResponse(
             {"calibrated": True, "bearing": bearing, "dec": dec}, 200
@@ -113,9 +111,6 @@ async def calibrate_solar_system_object():
         status, _ = await _final_status(
             get_telescope().calibrate(tc.SolarSystemTarget(_name))
         )
-        # ActivityStatus.COMPLETE = good, ActivityStatus.ABORTED = maybe bad,
-        # None = something went wrong (the command never produced any status)
-        print(status)
 
         return await returnResponse(
             {
@@ -139,12 +134,9 @@ async def goto():
     try:
         _ra = request.args.get("ra")
         _dec = request.args.get("dec")
-
         status, extra = await _wait_slew_complete(
             get_telescope().track(tc.FixedTarget(SkyCoord(ra=_ra, dec=_dec, frame=ICRS)))
         )
-        # FIXME: Inspect status, extra to make sure they are success values.
-        _ = status, extra
 
         return await returnResponse({"goto": True, "ra": _ra, "dec": _dec}, 200)
 
@@ -156,12 +148,10 @@ async def goto():
 async def goto_by_name():
     try:
         _name = request.args.get("name")
-
+        assert _name is not None
         status, extra = await _wait_slew_complete(
             get_telescope().track(tc.FixedTarget(SkyCoord.from_name(_name)))
         )
-        # FIXME: Inspect status, extra to make sure they are success values.
-        _ = status, extra
 
         return await returnResponse({"goto": True, "name": _name}, 200)
     except:
@@ -176,8 +166,6 @@ async def goto_by_mpc_query():
         status, extra = await _wait_slew_complete(
             get_telescope().track(tc.MPCQueryTarget(name))
         )
-        # FIXME: Inspect status, extra to make sure they are success values.
-        _ = status, extra
 
         return await returnResponse({"goto": True, "name": name}, 200)
     except:
@@ -192,8 +180,6 @@ async def goto_solar_system_object():
         status, extra = await _wait_slew_complete(
             get_telescope().track(tc.SolarSystemTarget(_name))
         )
-        # FIXME: Inspect status, extra to make sure they are success values.
-        _ = status, extra
 
         return await returnResponse(
             {

@@ -11,7 +11,6 @@ from .. import telescope_control as tc
 
 _log = logging.getLogger(__name__)
 
-
 def decode_ra(x: int):
     """Convert Stellarium wire RA value to fractional seconds"""
     return (x % 0xFFFFFFFF) / 0xFFFFFFFF * 86_400
@@ -34,15 +33,15 @@ def encode_dec(x: float):
 
 async def serve(host: str, port: int, telescope: tc.TelescopeControl):
     async def handler(stream: trio.SocketStream):
-        _log.info("connected")
+        _log.info("Off world DHD and MALP Connected")
         try:
             async with trio.open_nursery() as n:
                 n.start_soon(_report_position_loop, stream, telescope)
                 n.start_soon(_receive_target_loop, stream, telescope)
         except (trio.BrokenResourceError, EndOfStream):
-            _log.info("disconnected")
+            _log.info("Off world DHD and MALP disconnected")
         except Exception as e:
-            _log.error("disconnecting", exc_info=e)
+            _log.error("Disconnecting off world DHD and MALP", exc_info=e)
 
     await trio.serve_tcp(handler, port=port, host=host)
 
@@ -122,7 +121,7 @@ async def _read_target(stream: trio.SocketStream, telescope: tc.TelescopeControl
         frame=ICRS,
     )
 
-    _log.info(f"target: {coord}")
+    _log.info(f"Manually dialing Stargate Coordinates from off world DHD: {coord}")
     telescope.track(tc.FixedTarget(coord))
 
     return True
