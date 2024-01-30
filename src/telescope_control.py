@@ -173,6 +173,11 @@ class TelescopeControl:
     @property
     def target(self):
         return self._target
+    
+    def idle(self):
+        self._log.debug('Shut down the stargate')
+        self._log.debug('Close the iris!')
+        return self._put_message(_Idle())
 
     def track(self, target: Target) -> StatusChannel:
         return self._put_message(_Track(target))
@@ -257,7 +262,7 @@ class TelescopeControl:
         ):
             if stop.is_set():
                 stop_deadline = time.time() + 5
-                self._log.info("stopping")
+                self._log.info("Shut down the Stargate")
                 self._put_message(_Stop())
                 stop.clear()
 
@@ -299,7 +304,7 @@ class TelescopeControl:
                         assert_never(msg)
 
         if proc.exitcode is None:
-            self._log.error("timed out waiting for telescope control to stop")
+            self._log.error("Stargate won't shutdown")
             proc.kill()
 
         if child_had_error:
@@ -392,7 +397,7 @@ def _mp_main(config: Config, conn: mpc.Connection):
 
     log.addHandler(LogHandler())
 
-    log.debug("starting")
+    log.debug("Issuing top secret clearance...")
 
     ctx = _RunContext(
         config=config,
@@ -418,7 +423,9 @@ def _mp_main(config: Config, conn: mpc.Connection):
     for t in threads:
         t.start()
 
-    log.debug("running")
+    log.debug("Top Secret clearence issued")
+    log.debug("Welcome to Stargate HQ, Captain")
+    
     try:
         _run(ctx, conn)
     except Exception as e:
@@ -430,15 +437,17 @@ def _mp_main(config: Config, conn: mpc.Connection):
         for t in threads:
             t.join()
 
-        log.debug("threads complete")
+        # threads complete
+        log.debug("Disengaging chevrons")
 
         ctx.bearing_motor.stop()
-        log.debug("bearing motor stopped")
+        " bearing motor stopped"
+        log.debug("Bearing motor deactivated")
 
         ctx.dec_motor.stop()
-        log.debug("dec motor stopped")
+        log.debug("Declination motor deactivated")
 
-    log.debug(f"stopped")
+    log.debug(f"ᐰ Left Stargate Command ᐰ")
 
     import os, signal
 
@@ -501,20 +510,21 @@ def _read_goals(ctx: _RunContext, conn: mpc.Connection, activity_queue: Queue[_A
         msg: _InputMessage = conn.recv()
         match msg:
             case (_Track() | _Stop() | _Idle()) as goal:
-                ctx.log.debug(f"received goal {goal}")
+                ctx.log.debug(f"Received orders from MALP: {goal}")
                 with ctx.cond:
                     if ctx.activity is not None:
-                        ctx.log.debug(f"canceling activity: {ctx.activity}")
+                        ctx.log.debug(f"Canceling current SG-1 orders: {ctx.activity}")
                         ctx.activity.cancel()
                     activity = _TelescopeActivity(goal, ctx.activity_cond)
                     activity_queue.put(activity)
                     ctx.activity = activity
-                    ctx.log.debug(f"set activity: {ctx.activity}")
+                    ctx.log.debug(f"Executing orders: {ctx.activity}")
                     ctx.cond.notify()
 
                 if isinstance(goal, _Stop):
                     break
             case _Calibrate(bearing, dec):
+                ctx.log.debug("Entering gate coordinates")
                 with ctx.cond:
                     ctx.bearing_offset = round(
                         _angle_to_steps(ctx.config.bearing_axis, bearing)
@@ -524,13 +534,14 @@ def _read_goals(ctx: _RunContext, conn: mpc.Connection, activity_queue: Queue[_A
                         _angle_to_steps(ctx.config.declination_axis, dec)
                         - ctx.dec_motor.position
                     )
-                ctx.log.debug(f"calibrated: {ctx.bearing_offset}, {ctx.dec_offset}")
+                ctx.log.debug(f"Engaging chevrons")
+                ctx.log.debug(f"Chevron 7 locked: {ctx.bearing_offset}, {ctx.dec_offset}")
                 conn.send(_RequestProgress(msg, ActivityStatus.COMPLETE))
             case _CalibrateRelSteps(bearing, dec):
                 with ctx.cond:
                     ctx.bearing_offset += bearing
                     ctx.dec_offset += dec
-                ctx.log.debug(f"calibrated: {ctx.bearing_offset}, {ctx.dec_offset}")
+                ctx.log.debug(f"Chevron 7 locked: {ctx.bearing_offset}, {ctx.dec_offset}")
                 conn.send(_RequestProgress(msg, ActivityStatus.COMPLETE))
             case _:
                 assert_never(msg)
@@ -604,6 +615,7 @@ def _run_track(activity: _TelescopeActivity) -> StateFn:
             ctx.cond.notify_all()
 
         try:
+            ctx.log.info("Dialing gate address")
             predict_dt_ns = ctx.config.predict_ns
             predict_dt = predict_dt_ns * u.nanosecond  # pyright: ignore
 
@@ -649,7 +661,7 @@ def _run_track(activity: _TelescopeActivity) -> StateFn:
             elif bearing_params.t > dec_params.t:
                 dec_params = compute_intercept(**dec_kwargs, t=bearing_params.t)
             else:
-                ctx.log.debug("lucky you! synchronicity.")
+                ctx.log.debug("DHD is Synchonized")
 
             intercept_group = [
                 ctx.bearing_motor.intercept_precomputed(bearing_params, planned_to_ns),
@@ -672,7 +684,7 @@ def _run_track(activity: _TelescopeActivity) -> StateFn:
                 )
 
                 ctx.log.debug(
-                    f"planning tracking segment: {predict_dt_ns / 1_000_000_000:.2f} s"
+                    f"Adjusting for doppler shift: {predict_dt_ns / 1_000_000_000:.2f} s"
                 )
 
                 planned_to_ns += predict_dt_ns
@@ -686,9 +698,10 @@ def _run_track(activity: _TelescopeActivity) -> StateFn:
                 match _ag_wait_one_group(activity, activity_groups):
                     case None:
                         if activity_groups[0] == intercept_group:
-                            ctx.log.info("canceled while intercepting")
+                            # canceled while intercepting
+                            ctx.log.info("Unscheduled gate activity halted")
                         else:
-                            ctx.log.info("canceled while tracking")
+                            ctx.log.info("Unscheduled incoming traveler.")
                         break
                     case completed if completed is intercept_group:
                         with activity._cond:
@@ -769,7 +782,10 @@ def _run_idle(activity: _TelescopeActivity) -> StateFn:
     assert isinstance(activity._goal, _Idle)
 
     def run_idle(ctx: _RunContext, conn: mpc.Connection):
-        ctx.log.info("going idle")
+        ctx.log.info("Closing the iris")
+        _finalize_activity(activity)
+        _clear_activity(ctx, activity)
+        ctx.log.info("Wormhole disengaged")
         return _run_dispatch
 
     return run_idle
@@ -779,7 +795,7 @@ def _run_stop(activity: _TelescopeActivity) -> StateFn:
     assert isinstance(activity._goal, _Stop)
 
     def run_stop(ctx: _RunContext, conn: mpc.Connection):
-        ctx.log.info("stopping")
+        ctx.log.info("Shutting down the Stargate")
         ctx.stop.set()
         _finalize_activity(activity)
         _clear_activity(ctx, activity)

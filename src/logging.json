@@ -8,39 +8,39 @@
   "handlers": {
     "stderr": {
       "class": "logging.StreamHandler",
-      "level": "INFO",
+      "level": "DEBUG",
       "formatter": "simple",
       "stream": "ext://sys.stderr"
     }
   },
   "loggers": {
     "__main__": {
-      "level": "INFO",
+      "level": "DEBUG",
       "handlers": [
         "stderr"
       ],
-      "propagate": false
+      "propagate": true
     },
-    "lib.stellarium": {
-      "level": "INFO",
+    "src.lib.stellarium": {
+      "level": "DEBUG",
       "handlers": [
         "stderr"
       ],
-      "propagate": false
+      "propagate": true
     },
     "src.stepper": {
-      "level": "INFO",
+      "level": "DEBUG",
       "handlers": [
         "stderr"
       ],
-      "propagate": false
+      "propagate": true
     },
     "src.telescope_control": {
-      "level": "INFO",
+      "level": "DEBUG",
       "handlers": [
         "stderr"
       ],
-      "propagate": false
+      "propagate": true
     }
   }
 }
